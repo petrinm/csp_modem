@@ -1,5 +1,8 @@
 
 
+DEFINES = \
+	-DCSP_DEBUG
+
 SOURCES = \
 	csp_modem.c \
 	cfg.c \
@@ -9,7 +12,26 @@ SOURCES = \
 	libfec/ccsds_tab.c \
 	randomizer.c
 
-LIBCSP=libcsp
+INCLUDES = \
+	-Ilibcsp/include/ \
+	-Ilibcsp/build/include/ \
+	-Isuo/libsuo
+
+LIB_DIRS = \
+	-Llibcsp/build/ \
+	-Lsuo/libsuo/build/
+
+LIBS = \
+	-lcsp \
+	-lsuo-io \
+	-lsuo-dsp \
+	-lpthread \
+	-lzmq \
+	-lm
+
 
 csp_modem:
-	gcc $(SOURCES) -o csp_modem -L$(LIBCSP)/build/ -lcsp -lpthread -lzmq  -lm -I$(LIBCSP)/include/ -I$(LIBCSP)/build/include/ -DCSP_DEBUG -std=c99
+	gcc $(SOURCES) -o csp_modem $(INCLUDES) $(LIB_DIRS) $(LIBS) -std=c99
+
+clean:
+	rm csp_modem

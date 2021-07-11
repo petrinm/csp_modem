@@ -12,6 +12,8 @@
 #include "csp/csp.h"
 #include "csp/csp_endian.h"
 #include "csp/crypto/csp_hmac.h"
+#include "csp/csp_crc32.h"
+#include "csp/arch/csp_system.h"
 #include "csp/csp_interface.h"
 #include "csp/arch/csp_thread.h"
 #include "csp/interfaces/csp_if_zmqhub.h"
@@ -27,21 +29,28 @@ int make_frame() {
 
 void* zmq_ctx;
 
-void transmit_frame(void* a, int b) { }
-void receive_frame() {}
+int transmit_frame(void* a, int b) {
+	return -1;
+}
+int receive_frame() {
+	sleep(100);
+	return -1;
+}
 
 
-void forwarder_task(void* x)
+void* uplink_forwarder_task(void* x)
 {
 	(void)x;
 
 	csp_log_info("Starting TX forwarder");
 
 	void *subscriber = zmq_socket(zmq_ctx, ZMQ_SUB);
-	assert(zmq_connect(subscriber, "tcp://localhost:7000") == 0);
+	//assert(zmq_connect(subscriber, "tcp://127.0.0.1:6000") == 0);
+	assert(zmq_bind(subscriber, "tcp://127.0.0.1:6000") == 0);
 	assert(zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, "", 0) == 0);
 
 	csp_packet_t* packet = malloc(1024);
+	assert(packet != NULL);
 
 	while (1)
 	{
@@ -63,12 +72,20 @@ void forwarder_task(void* x)
 			continue;
 		}
 
+		char * satidptr = ((char *) &packet->id) - 1;
+		memcpy(satidptr, zmq_msg_data(&msg), datalen);
+		packet->length = datalen - sizeof(packet->id) - 1;
+
 		zmq_msg_close(&msg);
 
-		csp_log_packet("TX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %"PRIu16,
+
+		csp_log_packet("\033[0;35m" "TX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %"PRIu16,
 		               packet->id.src, packet->id.dst, packet->id.dport,
 		               packet->id.sport, packet->id.pri, packet->id.flags, packet->length);
 
+
+		stats.tx_count++;
+		stats.tx_bytes += packet->length;
 
 		/* Save the outgoing id in the buffer */
 		packet->id.ext = csp_hton32(packet->id.ext);
@@ -77,6 +94,7 @@ void forwarder_task(void* x)
 
 		/* Calculate HMAC if selected */
 		if (cfg.csp_hmac) {
+			csp_hmac_set_key(cfg.csp_hmac_key, cfg.legacy_hmac ? 4 : 16);
 			if (csp_hmac_append(packet, 1) != CSP_ERR_NONE) {
 				csp_log_warn("HMAC append failed!");
 				goto tx_err;
@@ -113,21 +131,34 @@ void forwarder_task(void* x)
 		if (cfg.csp_rand)
 			csp_apply_rand(packet);
 
-		transmit_frame(&packet->id, packet->length);
+		if (transmit_frame(&packet->id, packet->length) != 0)
+			csp_log_warn("Transmit failed!");
 
 tx_err:
-		x = 0;
+		continue;
 
 	}
 }
 
-void rx_fo() {
+
+void* downlink_forwarder_task(void* x) {
+	(void)x;
+
+	void *publisher = zmq_socket(zmq_ctx, ZMQ_SUB);
+	//assert(zmq_connect(publisher, "tcp://127.0.0.1:6001") == 0);
+	assert(zmq_bind(publisher, "tcp://127.0.0.1:6001") == 0);
+
+	csp_log_info("Starting RX forwarder");
 
 	csp_packet_t* packet = malloc(1024);
 
 	while (1) {
 
-		receive_frame(packet);
+		if (receive_frame(packet) != 0)
+			csp_log_warn("Transmit failed!");
+
+		if (packet->length < 4)
+			continue;
 
 		/* Unrandomize data if necessary */
 		if (cfg.csp_rand)
@@ -139,7 +170,7 @@ void rx_fo() {
 			if (ret < 0) {
 				csp_log_error("Failed to decode RS");
 				stats.rx_failed++;
-				continue;
+				goto rx_err;
 			}
 			csp_log_info("RS corrected %d errors", ret);
 			stats.rx_corrected_bytes += ret;
@@ -149,16 +180,17 @@ void rx_fo() {
 		if (cfg.csp_crc) {
 			if (csp_crc32_verify(packet, true) != CSP_ERR_NONE) {
 				csp_log_error("Invalid CRC32");
-				continue;
+				goto rx_err;
 			}
 		}
 
 #if 0
 		/* Verify HMAC if selected */
 		if (cfg.csp_hmac) {
+			csp_hmac_set_key(cfg.csp_hmac_key, cfg.legacy_hmac ? 4 : 16);
 			if (csp_hmac_verify(packet, true) != CSP_ERR_NONE) {
 				csp_log_error("Invalid HMAC");
-				continue;
+				goto rx_err;
 			}
 		}
 #endif
@@ -172,27 +204,29 @@ void rx_fo() {
 			continue;
 #endif
 
-		csp_log_packet("RX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %"PRIu16,
+		stats.rx_count++;
+		stats.rx_bytes += packet->length;
+
+		csp_log_packet("\033[0;36m" "RX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %"PRIu16,
 		               packet->id.src, packet->id.dst, packet->id.dport,
 		               packet->id.sport, packet->id.pri, packet->id.flags, packet->length);
 
 
-		void* publisher = NULL;
-		int result = zmq_send(publisher, packet, packet->length, 0);
-		if (result < 0)
-		{
-			fprintf(stderr, "ZMQ send error: %u %s\r\n", result, strerror(result));
-		}
+		// Send the frame to ZMQ
+		int ret = zmq_send(publisher, &packet->id, packet->length, 0);
+		if (ret < 0)
+			csp_log_error("RX ZMQ send error: %u %s", ret, strerror(ret));
 
-
+rx_err:
+		continue;
 	}
 }
 
 
 int main() {
 
-	void* zmq_ctx = zmq_ctx_new();
-	assert(zmq_ctx);
+	zmq_ctx = zmq_ctx_new();
+	assert(zmq_ctx != NULL);
 
 	csp_debug_set_level(CSP_WARN, 1);
 	csp_debug_set_level(CSP_INFO, 1);
@@ -201,31 +235,38 @@ int main() {
 	csp_debug_set_level(CSP_PROTOCOL, 1);
 	csp_debug_set_level(CSP_LOCK, 1);
 
-	csp_iface_t* hub;
-
 	csp_init(&cfg.csp);
 
-	if (cfg.csp_hmac)
-		csp_hmac_set_key(cfg.csp_hmac_key, 16);
-
-
 #if 0
-	//csp_zmqhub_init("127.0.0.1", 0, &hub);
-
-
-	if (csp_route_set(CSP_DEFAULT_ROUTE, &csp_if_zmqegse, CSP_NODE_MAC))
-		fprintf(stderr, "error in csp_route_set\n");
-
+	/*
+	 * Setup CSP proxy
+	 */
+	csp_iface_t* hub;
+	assert(csp_zmqhub_init("127.0.0.1", 0, &hub) != CSP_ERR_NONE);
+	assert(csp_route_set(CSP_DEFAULT_ROUTE, &csp_if_zmqegse, CSP_NODE_MAC) != CSP_ERR_NONE);
 
 	char zmqhost[16] = "127.0.0.1";
 	if (csp_zmqhub_make_endpoint(255, zmqhost))
 		return 0;
+
+	csp_route_start_task(1000, 0);
+
+	csp_conn_print_table();
+	csp_route_print_table();
+	csp_route_print_interfaces();
 #endif
 
 
-	pthread_t forwarder_worker;
-	pthread_create(&forwarder_worker, NULL, forwarder_task, NULL);
+	pthread_t transmit_worker;
+	pthread_create(&transmit_worker, NULL, uplink_forwarder_task, NULL);
+
+	pthread_t receive_worker;
+	pthread_create(&receive_worker, NULL, downlink_forwarder_task, NULL);
 
 
+	pthread_join(transmit_worker, NULL);
+
+
+	zmq_ctx_destroy(zmq_ctx);
 	return 0;
 }

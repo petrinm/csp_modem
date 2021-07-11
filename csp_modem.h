@@ -27,8 +27,11 @@ typedef struct {
 	uint8_t csp_hmac_key[16];
 	bool legacy_hmac;
 
-	uint8_t preamb;
-	uint8_t preamblen;
+	uint8_t preamble;
+	uint8_t preamble_len;
+
+	unsigned int syncword;
+	unsigned int syncword_len;
 
 } CSPModemConfig_t;
 extern CSPModemConfig_t cfg;
@@ -50,5 +53,6 @@ extern CSPModemStats_t stats;
 
 int csp_apply_rand(csp_packet_t* packet);
 int csp_fec_append(csp_packet_t* packet);
+int csp_fec_decode(csp_packet_t* packet);
 
 #endif

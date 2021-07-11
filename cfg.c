@@ -20,10 +20,14 @@ CSPModemConfig_t cfg = {
 
 	.csp_hmac = true,
 	.csp_rs = true,
-	.csp_crc = true,
+	.csp_crc = false,
 	.csp_rand = true,
 	.csp_hmac_key = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 	.legacy_hmac = false,
-	.preamb = 0xAA,
-	.preamblen = 0x50,
+
+	.preamble = 0xAA,
+	.preamble_len = 0x50,
+	.syncword = 0xC9D08A7B, // 0x930B51DE
+	.syncword_len = 32,
+
 };
