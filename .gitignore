@@ -1,2 +1,6 @@
-csp_modem
+build
+libcsp*
+.vscode
+suo
+dump
 *.gch

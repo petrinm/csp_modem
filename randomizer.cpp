@@ -1,5 +1,5 @@
 
-#include "csp_modem.h"
+#include "csp_modem.hpp"
 
 
 /*
@@ -46,8 +46,9 @@ static const uint8_t randomizer[RANDOMIZER_LEN] = {
 
 int csp_apply_rand(csp_packet_t* packet) {
 
+	uint8_t* data = (uint8_t*)&packet->id;
 	for (unsigned int i = 0; i < packet->length; i++)
-		packet->data[i] ^= randomizer[i % RANDOMIZER_LEN];
+		data[i] ^= randomizer[i % RANDOMIZER_LEN];
 
 	return CSP_ERR_NONE;
 }

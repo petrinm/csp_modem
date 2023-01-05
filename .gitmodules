@@ -1,6 +1,7 @@
 [submodule "libcsp"]
 	path = libcsp
 	url = https://github.com/libcsp/libcsp.git
+	branch = master
 [submodule "suo"]
 	path = suo
 	url = https://github.com/petrinm/suo.git
