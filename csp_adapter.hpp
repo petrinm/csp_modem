@@ -25,8 +25,6 @@ public:
 
 		bool use_xtea;
 		uint8_t xtea_key[20];
-
-		bool include_header;
 	};
 
 	struct Stats {
@@ -42,7 +40,8 @@ public:
 	~CSPAdapter();
 
 	void sourceFrame(suo::Frame &frame, suo::Timestamp now);
-	void sinkFrame(const suo::Frame &frame, suo::Timestamp now);
+	void sinkFrame(suo::Frame &frame, suo::Timestamp now);
+	void receiverLocked(bool locked, suo::Timestamp now);
 
 	/* Callback function for CSP. Called when a packet should be outputted. */
 	int csp_transmit(csp_packet_t *packet);

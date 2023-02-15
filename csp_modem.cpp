@@ -11,6 +11,7 @@
 #include <modem/mod_gmsk.hpp>
 #include <framing/golay_framer.hpp>
 #include <framing/golay_deframer.hpp>
+#include <frame-io/zmq_interface.hpp>
 
 #ifdef USE_PORTHOUSE_TRACKER
 #include <misc/porthouse_tracker.hpp>
@@ -66,7 +67,7 @@ int main(int argc, char *argv[])
 		 */
 		SoapySDRIO::Config sdr_conf;
 		sdr_conf.rx_on = true;
-		sdr_conf.tx_on = false;
+		sdr_conf.tx_on = true;
 		sdr_conf.use_time = 1;
 		sdr_conf.samplerate = 500000;
 		sdr_conf.tx_latency = 100; // [samples]
@@ -102,12 +103,9 @@ int main(int argc, char *argv[])
 		 * Setup frame decoder
 		 */
 		GolayDeframer::Config deframer_conf;
-		deframer_conf.sync_word = 0x930B51DE;
-		deframer_conf.sync_len = 32;
+		deframer_conf.syncword = 0x930B51DE;
+		deframer_conf.syncword_len = 32;
 		deframer_conf.sync_threshold = 3;
-		deframer_conf.skip_rs = false;
-		deframer_conf.skip_randomizer = false;
-		deframer_conf.skip_viterbi = false;
 
 		GolayDeframer deframer(deframer_conf);
 		deframer.syncDetected.connect_member(&receiver, &GMSKContinousDemodulator::lockReceiver);
@@ -132,8 +130,8 @@ int main(int argc, char *argv[])
 		 * Setup framer
 		 */
 		GolayFramer::Config framer_conf;
-		framer_conf.sync_word = 0x930B51DE;
-		framer_conf.sync_len = 32;
+		framer_conf.syncword = 0x930B51DE;
+		framer_conf.syncword_len = 32;
 		framer_conf.preamble_len = 12 * 8;
 		framer_conf.use_viterbi = false;
 		framer_conf.use_randomizer = true;
@@ -183,7 +181,6 @@ int main(int argc, char *argv[])
 #else
 		if (csp_zmqserver_init(CSP_NO_VIA_ADDRESS, "0.0.0.0", 0, &csp_zmq_if) != CSP_ERR_NONE)
 			throw SuoError("csp_zmqserver_init");
-
 #endif
 
 #ifdef CSP_RTABLE_CIDR 
@@ -201,11 +198,16 @@ int main(int argc, char *argv[])
 		 * Setup CSP proxy
 		 */
 		CSPAdapter::Config csp_adapter_conf;
+#ifdef EXTERNAL_SECRET
+#include "secret.hpp"
 		csp_adapter_conf.use_hmac = true;
-		//memcpy(csp_adapter_conf.hmac_key, secret_key, sizeof(csp_adapter_conf.hmac_key));
+		memcpy(csp_adapter_conf.hmac_key, secret_key, sizeof(csp_adapter_conf.hmac_key));
+#else
+		csp_adapter_conf.use_hmac = false;
+#endif
 		csp_adapter_conf.use_rs = false; // Done by GolayFramer/GolayDeframer
 		csp_adapter_conf.use_rand = false; // Done by GolayFramer/GolayDeframer
-		csp_adapter_conf.use_crc = true;
+		csp_adapter_conf.use_crc = false;
 
 		CSPAdapter csp_adapter(csp_adapter_conf);
 		framer.sourceFrame.connect_member(&csp_adapter, &CSPAdapter::sourceFrame);
@@ -254,6 +256,23 @@ int main(int argc, char *argv[])
 		//rigctl.setUplinkFrequency.connect_member(&modulator, &GMSKModulator::setFrequency);
 		//rigctl.setDownlinkFrequency.connect_member(&demodulator, &GMSKContinousDemodulator::setFrequency);
 		sdr.sinkTicks.connect_member(&rigctl, &RigCtl::tick);
+#endif
+
+#ifndef RAW_FRAMES
+		/*
+		 * ZMQ output
+		 */
+		ZMQPublisher::Config zmq_output_conf;
+		zmq_output_conf.bind = "tcp://0.0.0.0:7005";
+
+		ZMQPublisher zmq_output(zmq_output_conf);
+		//deframer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
+
+		deframer.sinkFrame.connect([&](Frame& frame, Timestamp now) {
+			zmq_output.sinkFrame(frame, now);
+		});
+
+		//framer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
 #endif
 
 		/*

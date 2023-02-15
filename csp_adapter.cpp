@@ -34,7 +34,6 @@ CSPAdapter::Config::Config() {
 	hmac_key[16] = {0};
 	use_xtea = false;
 	xtea_key[20] = {0};
-	include_header = false;
 }
 
 
@@ -62,17 +61,25 @@ CSPAdapter::CSPAdapter(const Config& _conf) :
 	/* Initialize CSP interface struct */
 	csp_iface.name = "SUO",
 	csp_iface.interface_data = this;
-	csp_iface.mtu = CSP_SUO_MTU;
+	csp_iface.mtu = csp_buffer_data_size(); 
+	if (conf.use_crc)
+		csp_iface.mtu -= sizeof(uint32_t); // Reserve space for CRC32
+	if (conf.use_hmac)
+		csp_iface.mtu -= CSP_HMAC_LENGTH; // Reserve space for hash
+	if (conf.use_hmac)
+		csp_iface.mtu -= sizeof(uint32_t); // Reserve space for nonce
 
 #ifdef OLD_CSP
-	csp_iface.nexthop = [](csp_iface_t *interface, csp_packet_t *packet, uint32_t timeout) -> int {
-		(void)timeout;
-		return static_cast<CSPAdapter *>(interface->interface_data)->csp_transmit(packet);
-	};
+			csp_iface.nexthop = [](csp_iface_t *interface, csp_packet_t *packet, uint32_t timeout) -> int
+		{
+			(void)timeout;
+			return static_cast<CSPAdapter *>(interface->interface_data)->csp_transmit(packet);
+		};
 #else
-	csp_iface.nexthop = [](const csp_route_t *route, csp_packet_t *packet) -> int {
-		return static_cast<CSPAdapter *>(route->iface->interface_data)->csp_transmit(packet);
-	};
+			csp_iface.nexthop = [](const csp_route_t *route, csp_packet_t *packet) -> int
+		{
+			return static_cast<CSPAdapter *>(route->iface->interface_data)->csp_transmit(packet);
+		};
 #endif
 
 	csp_bin_sem_create(&tx_wait); // != CSP_ERR_NONE
@@ -90,33 +97,48 @@ CSPAdapter::~CSPAdapter() {
 int CSPAdapter::csp_transmit(csp_packet_t *packet) {
 
 	if (tx_packet != nullptr) {
-		csp_log_warn("csp_transmit: tx_packet != nullptr\n");
+		csp_log_warn("csp_transmit is busy!\n");
+		return CSP_ERR_BUSY; // CSP_ERR_AGAIN
+	}
+
+	csp_log_packet("\033[0;35m"
+	               "TX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %" PRIu16,
+	               packet->id.src, packet->id.dst, packet->id.dport,
+	               packet->id.sport, packet->id.pri, packet->id.flags, packet->length);
+
+
+	// Make sure the waiting semaphore is not locked.
+	int ret = csp_bin_sem_wait(&tx_wait, 100);
+	if (ret != CSP_SEMAPHORE_OK) {
+		cerr << "Error: TX complete semaphora locked! " << ret << endl;
 		return CSP_ERR_BUSY;
 	}
 
-	cout << "csp_transmit JEEEEEEEEEEEEEEEEEE" << endl;
-	csp_log_packet("\033[0;35m"
-				   "TX: Src %u, Dst %u, Dport %u, Sport %u, Pri %u, Flags 0x%02X, Size %" PRIu16,
-				   packet->id.src, packet->id.dst, packet->id.dport,
-				   packet->id.sport, packet->id.pri, packet->id.flags, packet->length);
-
+	// Signal the frame from CSP router thread to suo thread
 	tx_packet = packet;
-	
+
+	// Wait until its released by the other task
+	ret = csp_bin_sem_wait(&tx_wait, 1000); 
+	if (ret != CSP_SEMAPHORE_OK) {
+		cerr << "Error: TX completed semaphora timed out! " << ret << endl;
+		return CSP_ERR_BUSY;
+	}
+	csp_bin_sem_wait(&tx_wait, 5); // Add time delay between frames.
 	csp_bin_sem_post(&tx_wait);
-	int ret = csp_bin_sem_wait(&tx_wait, 1000);
-	cout << "csp_bin_sem_wait " << ret << endl;
-	return ret;
+
+	return 0;
 }
+
 
 void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 {
 	(void)now;
 
 	// Copy CSP packet from TX queue to Frame
-	if (tx_packet == NULL) {
+	if (tx_packet == nullptr) {
 		if (tx_acked == false) {
 			tx_acked = true;
-			cout << "TX done" << endl;
+			//cout << "TX done" << endl;
 			csp_bin_sem_post(&tx_wait);
 		}
 		return;
@@ -127,12 +149,14 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 	stats.tx_count++;
 	stats.tx_bytes += tx_packet->length;
 
+#if 0
 	if (conf.use_hmac)
 		tx_packet->id.flags |= CSP_FHMAC;
 	if (conf.use_crc)
 		tx_packet->id.flags |= CSP_FCRC32;
 	if (conf.use_xtea)
 		tx_packet->id.flags |= CSP_FXTEA;
+#endif
 
 	/* Save the outgoing id in the buffer */
 	tx_packet->id.ext = csp_hton32(tx_packet->id.ext);
@@ -141,12 +165,24 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 	if (conf.use_hmac)
 	{
 #ifdef OLD_CSP
-		if (csp_hmac_append(tx_packet) != CSP_ERR_NONE)
+		/* Old CSP interface doesn't allow including the header in the HMAC, so we need to done this manually. */
+		uint8_t hmac[CSP_SHA1_DIGESTSIZE];
+		csp_sha1_memory(conf.hmac_key, (conf.legacy_hmac ? 4 : 16), hmac);
+		int ret = csp_hmac_memory(hmac, 16, &packet->id, packet->length + sizeof(packet->id), hmac);
+		memcpy(&packet->data[packet->length], hmac, CSP_HMAC_LENGTH);
+		packet->length += CSP_HMAC_LENGTH;
+#elif defined(HMAC_HACK)
+		/* HMAC calculation without key hashing. */
+		uint8_t hmac[CSP_SHA1_DIGESTSIZE];
+		int ret = csp_hmac_memory(conf.hmac_key, sizeof(conf.hmac_key), &tx_packet->id, tx_packet->length + sizeof(tx_packet->id), hmac);
+		memcpy(&tx_packet->data[tx_packet->length], hmac, CSP_HMAC_LENGTH);
+		tx_packet->length += CSP_HMAC_LENGTH;
 #else
-		if (csp_hmac_append(tx_packet, conf.include_header) != CSP_ERR_NONE)
+		int ret = csp_hmac_append(tx_packet, true);
 #endif
+		if (ret != CSP_ERR_NONE)
 		{
-			csp_log_warn("HMAC append failed!\n");
+			csp_log_warn("HMAC append failed %d\n", ret);
 			return;
 		}
 	}
@@ -155,12 +191,13 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 	if (conf.use_crc)
 	{
 #ifdef OLD_CSP
-		if (csp_crc32_append(tx_packet) != CSP_ERR_NONE)
+		int ret = csp_crc32_append(tx_packet);
 #else
-		if (csp_crc32_append(tx_packet, conf.include_header) != CSP_ERR_NONE)
+		int ret = csp_crc32_append(tx_packet, true);
 #endif
+		if (ret != CSP_ERR_NONE)
 		{
-			csp_log_warn("CRC32 append failed!\n");
+			csp_log_warn("CRC32 append failed! %d\n", ret);
 			return;
 		}
 	}
@@ -168,12 +205,12 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 	if (conf.use_xtea) {
 #if (CSP_USE_XTEA)
 #ifdef OLD_CSP
-		if(1) // if (csp_xtea_encrypt(& tx_packet->id) != CSP_ERR_NONE)
+		int ret = 0; //csp_xtea_encrypt(& tx_packet->id);
 #else
-		if (csp_xtea_encrypt_packet(tx_packet) != CSP_ERR_NONE)
+		int ret = csp_xtea_encrypt_packet(tx_packet);
 #endif
-		{
-			csp_log_warn("XTEA Encryption failed!\n");
+		if(ret != CSP_ERR_NONE) {
+			csp_log_warn("XTEA Encryption failed! %d\n", ret);
 			return;
 		}
 #else
@@ -187,6 +224,7 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 	/* Copy data to Suo frame */
 	frame.data.resize(tx_packet->length);
 	memcpy(&frame.data[0], &tx_packet->id, tx_packet->length);
+	cout << frame.data;
 
 	csp_buffer_free(tx_packet);
 	tx_packet = nullptr;
@@ -195,7 +233,7 @@ void CSPAdapter::sourceFrame(Frame &frame, Timestamp now)
 }
 
 
-void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
+void CSPAdapter::sinkFrame(Frame &frame, Timestamp now)
 {
 	(void)now;
 
@@ -216,9 +254,7 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 		throw SuoError("");
 
 	memcpy(&packet->id, frame.data.data(), frame.size());
-	
-	/* The CSP packet length is without the header */
-	packet->length = frame.size() - sizeof(csp_id_t);
+	packet->length = frame.size();
 
 	/* Unrandomize data if necessary */
 	if (conf.use_rand) {
@@ -226,7 +262,7 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	}
 
 	/* Decode Reed-Solomon if selected */
-	if (conf.use_rs) 
+	if (conf.use_rs)
 	{
 		int ret = csp_fec_decode(packet);
 		if (ret < 0)
@@ -242,6 +278,9 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	else {
 		//stats.rx_corrected_bytes += frame.metadata["rs_"];
 	}
+
+	/* The CSP packet length is without the header */
+	packet->length = frame.size() - sizeof(csp_id_t);
 
 	/* Convert the packet from network to host order */
 	packet->id.ext = csp_ntoh32(packet->id.ext);
@@ -272,15 +311,17 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 
 	/* Validate CRC */
 	if (conf.use_crc) {
-		if ((packet->id.flags & CSP_FCRC32) != 0)
+		if (1 || (packet->id.flags & CSP_FCRC32) != 0)
 		{
-	#ifdef OLD_CSP
-			if (csp_crc32_verify(packet) != CSP_ERR_NONE)
-	#else
-			if (csp_crc32_verify(packet, conf.include_header) != CSP_ERR_NONE)
-	#endif
+#ifdef OLD_CSP
+			// TODO: Doesn't account the header correctly!
+			int ret = csp_crc32_verify(packet);
+#else
+			int ret = csp_crc32_verify(packet, true);
+#endif
+			if (ret != CSP_ERR_NONE)
 			{
-				csp_log_warn("Invalid CRC, len %u", packet->length);
+				csp_log_warn("Invalid CRC %d", ret);
 				csp_buffer_free(packet);
 				stats.rx_failed++;
 				return;
@@ -293,14 +334,20 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	}
 
 	/* Verify HMAC if selected */
-	if (conf.use_hmac) {
+	if (0 && conf.use_hmac) {
 		if ((packet->id.flags & CSP_FHMAC) != 0) {
 #ifdef OLD_CSP
-			if (csp_hmac_verify(packet) != CSP_ERR_NONE) {
+			/* Old CSP interface doesn't allow including the header in the HMAC, so we need to done this manually. */
+			uint8_t hmac[CSP_SHA1_DIGESTSIZE];
+			csp_sha1_memory(conf.hmac_key, (conf.legacy_hmac ? 4 : 16), hmac);
+			int ret = csp_hmac_memory(hmac, 16, &packet->id, packet->length + sizeof(packet->id), hmac);
+			if (ret != CSP_ERR_NONE && memcmp(&packet->data[packet->length] - CSP_HMAC_LENGTH, hmac, CSP_HMAC_LENGTH) != 0)
+				ret = CSP_ERR_HMAC;
 #else
-			if (csp_hmac_verify(packet, conf.include_header) != CSP_ERR_NONE) {
+			int ret = csp_hmac_verify(packet, true);
 #endif
-				csp_log_error("Invalid HMAC");
+			if (ret != CSP_ERR_NONE) {
+				csp_log_error("HMAC error %d", ret);
 				csp_buffer_free(packet);
 				stats.rx_failed++;
 				return;
@@ -316,12 +363,6 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	}
 
 
-#if 0
-	// Ignore packets from node 10 (client packets loop through zmq otherwise)
-	if (packet->id.dst == 10)
-		continue;
-#endif
-
 	stats.rx_count++;
 	stats.rx_bytes += packet->length;
 
@@ -331,4 +372,14 @@ void CSPAdapter::sinkFrame(const Frame &frame, Timestamp now)
 				   packet->id.sport, packet->id.pri, packet->id.flags, packet->length);
 
 	csp_qfifo_write(packet, &csp_iface, NULL);
+}
+
+void CSPAdapter::receiverLocked(bool locked, suo::Timestamp now) {
+	(void)now;
+	if (locked) {
+
+	}
+	else {
+
+	}
 }
