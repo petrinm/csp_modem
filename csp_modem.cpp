@@ -20,7 +20,7 @@
 #include <misc/rigctl.hpp>
 #endif
 
-#include "csp_adapter.hpp"
+#include "csp_suo_adapter.hpp"
 
 /* CSP stuff */
 #include <csp/csp.h>
@@ -62,6 +62,8 @@ int main(int argc, char *argv[])
 
 	try
 	{
+		const float center_frequency = 437.775e6; // [Hz]
+		
 		/*
 		 * SDR
 		 */
@@ -77,8 +79,8 @@ int main(int argc, char *argv[])
 
 		sdr_conf.args["driver"] = "uhd";
 
-		sdr_conf.rx_centerfreq = 437.00e6;
-		sdr_conf.tx_centerfreq = 437.00e6;
+		sdr_conf.rx_centerfreq = 436.00e6;
+		sdr_conf.tx_centerfreq = sdr_conf.rx_centerfreq;
 
 		sdr_conf.rx_gain = 30;
 		sdr_conf.tx_gain = 60;
@@ -92,12 +94,15 @@ int main(int argc, char *argv[])
 		/*
 		 * Setup receiver
 		 */
-		GMSKContinousDemodulator::Config receiver_conf;
-		receiver_conf.symbol_rate = 9600;
+		GMSKContinousDemodulator::Config demodulator_conf;
+		demodulator_conf.sample_rate = sdr_conf.samplerate;
+		demodulator_conf.center_frequency = center_frequency - sdr_conf.rx_centerfreq;
+		demodulator_conf.symbol_rate = 9600;
+		demodulator_conf.bt = 0.5;
+		demodulator_conf.samples_per_symbol = 4;
 
-		GMSKContinousDemodulator receiver(receiver_conf);
-		sdr.sinkSamples.connect_member(&receiver, &GMSKContinousDemodulator::sinkSamples);
-
+		GMSKContinousDemodulator demodulator(demodulator_conf);
+		sdr.sinkSamples.connect_member(&demodulator, &GMSKContinousDemodulator::sinkSamples);
 
 		/*
 		 * Setup frame decoder
@@ -106,39 +111,45 @@ int main(int argc, char *argv[])
 		deframer_conf.syncword = 0x930B51DE;
 		deframer_conf.syncword_len = 32;
 		deframer_conf.sync_threshold = 3;
+		deframer_conf.use_viterbi = false;
+		deframer_conf.use_randomizer = true;
+		deframer_conf.use_rs = true;
 
 		GolayDeframer deframer(deframer_conf);
-		deframer.syncDetected.connect_member(&receiver, &GMSKContinousDemodulator::lockReceiver);
-		receiver.sinkSymbol.connect_member(&deframer, &GolayDeframer::sinkSymbol);
-
+		deframer.syncDetected.connect_member(&demodulator, &GMSKContinousDemodulator::lockReceiver);
+		//deframer.syncDetected.connect([](bool locked, Timestamp now) {
+		//	cout << "locked " << locked << endl;
+		//});
+		demodulator.sinkSymbol.connect_member(&deframer, &GolayDeframer::sinkSymbol);
+		demodulator.setMetadata.connect_member(&deframer, &GolayDeframer::setMetadata);
 
 		/*
 		 * Setup transmitter
 		 */
 		GMSKModulator::Config modulator_conf;
 		modulator_conf.sample_rate = sdr_conf.samplerate;
+		modulator_conf.center_frequency = center_frequency - sdr_conf.tx_centerfreq;
 		modulator_conf.symbol_rate = 9600;
-		modulator_conf.center_frequency = 125.0e3;
 		modulator_conf.bt = 0.5;
-		modulator_conf.ramp_up_duration = 2;
-		modulator_conf.ramp_down_duration = 2;
+		modulator_conf.ramp_up_duration = 2; // [symbols]
+		modulator_conf.ramp_down_duration = 2; // [symbols]
 
 		GMSKModulator modulator(modulator_conf);
-		sdr.sourceSamples.connect_member(&modulator, &GMSKModulator::sourceSamples);
+		sdr.generateSamples.connect_member(&modulator, &GMSKModulator::generateSamples);
 
 		/*
 		 * Setup framer
 		 */
 		GolayFramer::Config framer_conf;
-		framer_conf.syncword = 0x930B51DE;
-		framer_conf.syncword_len = 32;
-		framer_conf.preamble_len = 12 * 8;
+		framer_conf.syncword = deframer_conf.syncword;
+		framer_conf.syncword_len = deframer_conf.syncword_len;
+		framer_conf.preamble_len = 24 * 8; // [symbols]
 		framer_conf.use_viterbi = false;
 		framer_conf.use_randomizer = true;
 		framer_conf.use_rs = true;
 
 		GolayFramer framer(framer_conf);
-		modulator.sourceSymbols.connect_member(&framer, &GolayFramer::sourceSymbols);
+		modulator.generateSymbols.connect_member(&framer, &GolayFramer::generateSymbols);
 
 
 		/*
@@ -197,7 +208,7 @@ int main(int argc, char *argv[])
 		/*
 		 * Setup CSP proxy
 		 */
-		CSPAdapter::Config csp_adapter_conf;
+		CSPSuoAdapter::Config csp_adapter_conf;
 #ifdef EXTERNAL_SECRET
 #include "secret.hpp"
 		csp_adapter_conf.use_hmac = true;
@@ -209,9 +220,9 @@ int main(int argc, char *argv[])
 		csp_adapter_conf.use_rand = false; // Done by GolayFramer/GolayDeframer
 		csp_adapter_conf.use_crc = false;
 
-		CSPAdapter csp_adapter(csp_adapter_conf);
-		framer.sourceFrame.connect_member(&csp_adapter, &CSPAdapter::sourceFrame);
-		deframer.sinkFrame.connect_member(&csp_adapter, &CSPAdapter::sinkFrame);
+		CSPSuoAdapter csp_adapter(csp_adapter_conf);
+		framer.sourceFrame.connect_member(&csp_adapter, &CSPSuoAdapter::sourceFrame);
+		deframer.sinkFrame.connect_member(&csp_adapter, &CSPSuoAdapter::sinkFrame);
 
 #ifdef CSP_RTABLE_CIDR
 		// Route packets going to addresses 0-7 to space 
@@ -240,25 +251,33 @@ int main(int argc, char *argv[])
 		PorthouseTracker::Config tracker_conf;
 		tracker_conf.amqp_url = "amqp://guest:guest@localhost/";
 		tracker_conf.target_name = "Suomi-100";
-		tracker_conf.center_frequency = 437.775e6; // [Hz]
+		tracker_conf.center_frequency = center_frequency; // [Hz]
 
 		PorthouseTracker tracker(tracker_conf);
-		//tracker.setUplinkFrequency.connect_member(&modulator, &GMSKModulator::setFrequency);
-		//tracker.setDownlinkFrequency.connect_member(&demodulator, &GMSKContinousDemodulator::setFrequency);
+		tracker.setUplinkFrequency.connect([&] (float frequency) {
+			modulator.setFrequencyOffset(frequency - center_frequency);
+		});
+		tracker.setDownlinkFrequency.connect([&] (float frequency) {
+			demodulator.setFrequencyOffset(frequency - center_frequency);
+		});
 		sdr.sinkTicks.connect_member(&tracker, &PorthouseTracker::tick);
 #endif
 
-#ifdef USE_RIGCTL
+#ifdef USE_RIGCTL_TRACKER
 		/*
 		 * Setup rigctl for frequency tracking
 		 */
 		RigCtl rigctl;
-		//rigctl.setUplinkFrequency.connect_member(&modulator, &GMSKModulator::setFrequency);
-		//rigctl.setDownlinkFrequency.connect_member(&demodulator, &GMSKContinousDemodulator::setFrequency);
+		rigctl.setUplinkFrequency.connect([&] (float frequency) {
+			modulator.setFrequencyOffset(frequency - center_frequency);
+		});
+		rigctl.setDownlinkFrequency.connect([&] (float frequency) {
+			demodulator.setFrequencyOffset(frequency - center_frequency);
+		});
 		sdr.sinkTicks.connect_member(&rigctl, &RigCtl::tick);
 #endif
 
-#ifndef RAW_FRAMES
+#ifdef OUTPUT_RAW_FRAMES
 		/*
 		 * ZMQ output
 		 */
@@ -267,12 +286,20 @@ int main(int argc, char *argv[])
 
 		ZMQPublisher zmq_output(zmq_output_conf);
 		//deframer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
+		//framer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
 
-		deframer.sinkFrame.connect([&](Frame& frame, Timestamp now) {
-			zmq_output.sinkFrame(frame, now);
+		deframer.sinkFrame.connect([&](const Frame& frame, Timestamp now) {
+			Frame copy_frame(frame);
+			copy_frame.setMetadata("packet_type", "uplink");
+			zmq_output.sinkFrame(copy_frame, now);
 		});
 
-		//framer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
+		deframer.sinkFrame.connect([&](const Frame& frame, Timestamp now) {
+			Frame copy_frame(frame);
+			copy_frame.setMetadata("packet_type", "downlink");
+			zmq_output.sinkFrame(copy_frame, now);
+		});
+
 #endif
 
 		/*

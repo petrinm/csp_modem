@@ -6,6 +6,11 @@
 #ifndef _FEC_H_
 #define _FEC_H_
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* r=1/2 k=7 convolutional encoder polynomials
  * The NASA-DSN convention is to use V27POLYA inverted, then V27POLYB
  * The CCSDS/NASA-GSFC convention is to use V27POLYB, then V27POLYA inverted
@@ -340,6 +345,10 @@ unsigned long long sumsq_av(signed short *in,int cnt);
 /* Low-level data structures and routines */
 
 int cpu_features(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _FEC_H_ */
 

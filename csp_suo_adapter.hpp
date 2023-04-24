@@ -9,7 +9,7 @@
 /* 
  * Suo block to connect
  */
-class CSPAdapter : public suo::Block
+class CSPSuoAdapter : public suo::Block
 {
 public:
 
@@ -25,6 +25,9 @@ public:
 
 		bool use_xtea;
 		uint8_t xtea_key[20];
+
+		/* Filter out frames which originate from ground segment. */
+		bool filter_ground_addresses;
 	};
 
 	struct Stats {
@@ -34,14 +37,23 @@ public:
 		unsigned int rx_bytes;
 		unsigned int rx_failed;
 		unsigned int rx_corrected_bytes;
+		unsigned int rx_bits_corrected;
 	};
 
-	explicit CSPAdapter(const Config &conf = Config());
-	~CSPAdapter();
 
+	/* Constructor */
+	explicit CSPSuoAdapter(const Config &conf = Config());
+	~CSPSuoAdapter();
+
+	CSPSuoAdapter(const CSPSuoAdapter &) = delete;
+	CSPSuoAdapter &operator=(const CSPSuoAdapter &) = delete;
+
+
+	/* Source new frame to be transmitted (suo callback function) */
 	void sourceFrame(suo::Frame &frame, suo::Timestamp now);
-	void sinkFrame(suo::Frame &frame, suo::Timestamp now);
-	void receiverLocked(bool locked, suo::Timestamp now);
+
+	/* Sink a received frame  to be transmitted (suo callback function) */
+	void sinkFrame(const suo::Frame &frame, suo::Timestamp now);
 
 	/* Callback function for CSP. Called when a packet should be outputted. */
 	int csp_transmit(csp_packet_t *packet);

@@ -4,3 +4,5 @@ libcsp*
 suo
 dump
 *.gch
+.cache
+secret.hpp
