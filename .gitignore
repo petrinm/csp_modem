@@ -1,8 +1,12 @@
 build
 libcsp*
 .vscode
+.vs
+CMakeSettings.json
 suo
 dump
 *.gch
 .cache
 secret.hpp
+/*_cfg.cpp
+!sample_cfg.cpp

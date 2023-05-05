@@ -16,18 +16,28 @@ public:
 	struct Config {
 		Config();
 
-		bool use_hmac;
-		bool use_rs;
-		bool use_crc;
-		bool use_rand;
-		bool legacy_hmac;
-		uint8_t hmac_key[16];
+		bool rx_use_hmac;
+		bool rx_use_rs;
+		bool rx_use_crc;
+		bool rx_use_rand;
+		bool rx_legacy_hmac;
+		uint8_t rx_hmac_key[16];
 
-		bool use_xtea;
-		uint8_t xtea_key[20];
+		bool rx_use_xtea;
+		uint8_t rx_xtea_key[20];
 
 		/* Filter out frames which originate from ground segment. */
-		bool filter_ground_addresses;
+		bool rx_filter_ground_addresses;
+
+		bool tx_use_hmac;
+		bool tx_use_rs;
+		bool tx_use_crc;
+		bool tx_use_rand;
+		bool tx_legacy_hmac;
+		uint8_t tx_hmac_key[16];
+
+		bool tx_use_xtea;
+		uint8_t tx_xtea_key[20];
 	};
 
 	struct Stats {
@@ -69,3 +79,6 @@ private:
 	bool tx_acked;
 
 };
+
+int custom_csp_hmac_append(uint8_t* hmac_key, csp_packet_t* packet, bool include_header);
+int custom_csp_hmac_verify(uint8_t* hmac_key, csp_packet_t* packet, bool include_header);
