@@ -128,7 +128,9 @@ int main(int argc, char *argv[])
 
 		//Setup CSP proxy
 		CSPSuoAdapter csp_adapter(cfg_csp_suo_adapter());
+#ifdef OUTPUT_RAW_FRAMES
 		framer.sourceFrame.connect_member(&csp_adapter, &CSPSuoAdapter::sourceFrame);
+#endif
 		deframer.sinkFrame.connect_member(&csp_adapter, &CSPSuoAdapter::sinkFrame);
 
 #ifdef CSP_RTABLE_CIDR
@@ -180,13 +182,12 @@ int main(int argc, char *argv[])
 		zmq_output_conf.bind = "tcp://0.0.0.0:7005";
 
 		ZMQPublisher zmq_output(zmq_output_conf);
-		//deframer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
-		//framer.sinkFrame.connect_member(&zmq_output, &ZMQPublisher::sinkFrame);
-
-		deframer.sinkFrame.connect([&](const Frame& frame, Timestamp now) {
-			Frame copy_frame(frame);
-			copy_frame.setMetadata("packet_type", "uplink");
-			zmq_output.sinkFrame(copy_frame, now);
+		framer.sourceFrame.connect([&](Frame& frame, Timestamp now) {
+			csp_adapter.sourceFrame(frame, now);
+			if (frame.empty() == false) {
+				frame.setMetadata("packet_type", "uplink");
+				zmq_output.sinkFrame(frame, now);
+			}
 		});
 
 		deframer.sinkFrame.connect([&](const Frame& frame, Timestamp now) {
