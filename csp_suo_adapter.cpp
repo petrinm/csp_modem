@@ -3,18 +3,8 @@
 
 #include <csp/csp.h>
 #include <csp/csp_endian.h>
-#ifdef OLD_CSP
-extern "C"
-{
-	int csp_hmac_append(csp_packet_t *packet);
-	int csp_hmac_verify(csp_packet_t *packet);
-	int csp_xtea_encrypt(uint8_t *plain, const uint32_t len, uint32_t iv[2]);
-	int csp_xtea_decrypt(uint8_t *cipher, const uint32_t len, uint32_t iv[2]);
-}
-#else
 #include <csp/crypto/csp_hmac.h>
 #include <csp/crypto/csp_xtea.h>
-#endif
 #include <csp/csp_crc32.h>
 #include <csp/arch/csp_system.h>
 #include <csp/csp_interface.h>
@@ -32,15 +22,24 @@ using namespace suo;
 
 
 CSPSuoAdapter::Config::Config() {
-	use_hmac = false;
-	use_rs = true;
-	use_crc = false;
-	use_rand = false;
-	legacy_hmac = false;
-	hmac_key[16] = {0};
-	use_xtea = false;
-	xtea_key[20] = {0};
-	filter_ground_addresses = true;
+	rx_use_hmac = false;
+	rx_use_rs = false;
+	rx_use_crc = false;
+	rx_use_rand = false;
+	rx_legacy_hmac = false;
+	rx_hmac_key[16] = {0};
+	rx_use_xtea = false;
+	rx_xtea_key[20] = {0};
+	rx_filter_ground_addresses = true;
+
+	tx_use_hmac = false;
+	tx_use_rs = false;
+	tx_use_crc = false;
+	tx_use_rand = false;
+	tx_legacy_hmac = false;
+	tx_hmac_key[16] = {0};
+	tx_use_xtea = false;
+	tx_xtea_key[20] = {0};
 }
 
 
@@ -52,39 +51,20 @@ CSPSuoAdapter::CSPSuoAdapter(const Config& _conf) :
 	memset(&csp_iface, 0, sizeof(csp_iface));
 	memset(&stats, 0, sizeof(stats));
 
-#if OLD_CSP
-	if (conf.use_xtea)
-		csp_xtea_set_key(static_cast<char*>(conf.xtea_key), 20);
-	if (conf.use_hmac)
-		csp_hmac_set_key(static_cast<char*>(conf.hmac_key), conf.legacy_hmac ? 4 : 16);
-#else
-	if (conf.use_xtea)
-		csp_xtea_set_key(conf.xtea_key, 20);
-	if (conf.use_hmac)
-		csp_hmac_set_key(conf.hmac_key, conf.legacy_hmac ? 4 : 16);
-#endif
-
 	/* Initialize CSP interface struct */
-	csp_iface.name = "SUO",
+	csp_iface.name = "SUO";
 	csp_iface.interface_data = this;
-	csp_iface.mtu = csp_buffer_data_size(); 
-	if (conf.use_crc)
-		csp_iface.mtu -= sizeof(uint32_t); // Reserve space for CRC32
-	if (conf.use_hmac)
-		csp_iface.mtu -= CSP_HMAC_LENGTH; // Reserve space for hash
-	if (conf.use_hmac)
-		csp_iface.mtu -= sizeof(uint32_t); // Reserve space for nonce
+	csp_iface.mtu = csp_buffer_data_size();
+	if (conf.tx_use_crc)
+		csp_iface.mtu -= sizeof(uint32_t);  // Reserve space for CRC32
+	if (conf.tx_use_hmac)
+		csp_iface.mtu -= CSP_HMAC_LENGTH;  // Reserve space for hash
+	if (conf.tx_use_xtea)
+		csp_iface.mtu -= sizeof(uint32_t);  // Reserve space for nonce
 
-#ifdef OLD_CSP
-	csp_iface.nexthop = [](csp_iface_t *interface, csp_packet_t *packet, uint32_t timeout) -> int {
-		(void)timeout;
-		return static_cast<CSPSuoAdapter *>(interface->interface_data)->csp_transmit(packet);
-	};
-#else
 	csp_iface.nexthop = [](const csp_route_t *route, csp_packet_t *packet) -> int {
 		return static_cast<CSPSuoAdapter *>(route->iface->interface_data)->csp_transmit(packet);
 	};
-#endif
 
 	csp_bin_sem_create(&tx_wait);
 
@@ -154,29 +134,14 @@ void CSPSuoAdapter::sourceFrame(Frame &frame, Timestamp now)
 	stats.tx_count++;
 	stats.tx_bytes += tx_packet->length;
 
-
 	/* Save the outgoing id in the buffer */
 	tx_packet->id.ext = csp_hton32(tx_packet->id.ext);
 
 	/* Calculate HMAC if selected */
-	if (conf.use_hmac)
+	if (conf.tx_use_hmac)
 	{
-#ifdef OLD_CSP
-		/* Old CSP interface doesn't allow including the header in the HMAC, so we need to done this manually. */
-		uint8_t hmac[CSP_SHA1_DIGESTSIZE];
-		csp_sha1_memory(conf.hmac_key, (conf.legacy_hmac ? 4 : 16), hmac);
-		int ret = csp_hmac_memory(hmac, 16, &packet->id, packet->length + sizeof(packet->id), hmac);
-		memcpy(&packet->data[packet->length], hmac, CSP_HMAC_LENGTH);
-		packet->length += CSP_HMAC_LENGTH;
-#elif defined(HMAC_HACK)
-		/* HMAC calculation without key hashing. */
-		uint8_t hmac[CSP_SHA1_DIGESTSIZE];
-		int ret = csp_hmac_memory(conf.hmac_key, sizeof(conf.hmac_key), &tx_packet->id, tx_packet->length + sizeof(tx_packet->id), hmac);
-		memcpy(&tx_packet->data[tx_packet->length], hmac, CSP_HMAC_LENGTH);
-		tx_packet->length += CSP_HMAC_LENGTH;
-#else
+		csp_hmac_set_key(conf.tx_hmac_key, conf.tx_legacy_hmac ? 4 : 16);
 		int ret = csp_hmac_append(tx_packet, true);
-#endif
 		if (ret != CSP_ERR_NONE)
 		{
 			csp_log_warn("HMAC append failed %d\n", ret);
@@ -185,13 +150,9 @@ void CSPSuoAdapter::sourceFrame(Frame &frame, Timestamp now)
 	}
 
 	/* Calculate CRC32 if selected */
-	if (conf.use_crc)
+	if (conf.tx_use_crc)
 	{
-#ifdef OLD_CSP
-		int ret = csp_crc32_append(tx_packet);
-#else
 		int ret = csp_crc32_append(tx_packet, true);
-#endif
 		if (ret != CSP_ERR_NONE)
 		{
 			csp_log_warn("CRC32 append failed! %d\n", ret);
@@ -200,13 +161,10 @@ void CSPSuoAdapter::sourceFrame(Frame &frame, Timestamp now)
 	}
 
 	/* Calculate XTEA encryption if selected */
-	if (conf.use_xtea) {
+	if (conf.tx_use_xtea) {
 #if (CSP_USE_XTEA)
-#ifdef OLD_CSP
-		int ret = 0; //csp_xtea_encrypt(& tx_packet->id);
-#else
+		csp_xtea_set_key(conf.tx_xtea_key, 20);
 		int ret = csp_xtea_encrypt_packet(tx_packet);
-#endif
 		if(ret != CSP_ERR_NONE) {
 			csp_log_warn("XTEA Encryption failed! %d\n", ret);
 			return;
@@ -217,7 +175,7 @@ void CSPSuoAdapter::sourceFrame(Frame &frame, Timestamp now)
 #endif
 	}
 
-	if (conf.use_rs) {
+	if (conf.tx_use_rs) {
 #ifdef LIBFEC
 		encode_rs_8((uint8_t *)&tx_packet->id, &tx_packet->data[tx_packet->length], CSP_RS_MSGLEN - tx_packet->length);
 		tx_packet->length += CSP_RS_LEN;
@@ -266,11 +224,11 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	stats.rx_count++;
 
 	/* Unrandomize data if necessary */
-	if (conf.use_rand)
+	if (conf.rx_use_rand)
 		csp_apply_rand(packet);
 
 	/* Decode Reed-Solomon if selected */
-	if (conf.use_rs) {
+	if (conf.rx_use_rs) {
 #ifdef LIBFEC
 		int ret = decode_rs_8((uint8_t *)&packet->id, NULL, 0, CSP_RS_MSGLEN + CSP_RS_LEN - packet->length);
 		if (ret < 0) {
@@ -294,14 +252,15 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 #endif
 #else
 		csp_log_error("libfec not supported\n");
+		csp_buffer_free(packet);
 		return;
 #endif
 	}
 	else {
 		// Increment statistics based on metadata inside the suo frame
 		try {
-			stats.rx_corrected_bytes += get<int>(frame.metadata.at("rs_bytes_corrected"));
-			stats.rx_bits_corrected += get<int>(frame.metadata.at("rs_bits_corrected"));
+			stats.rx_corrected_bytes += get<unsigned int>(frame.metadata.at("rs_bytes_corrected"));
+			stats.rx_bits_corrected += get<unsigned int>(frame.metadata.at("rs_bits_corrected"));
 		}
 		catch (std::out_of_range& e) {
 			cerr << "Frame missing field: " << e.what() << endl;
@@ -311,24 +270,10 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	/* The CSP packet length is without the header */
 	packet->length = frame.size() - sizeof(csp_id_t);
 
-	/* Convert the packet from network to host order */
-	packet->id.ext = csp_ntoh32(packet->id.ext);
-
-
-	/* Ignore frame if source port indicates that is coming from ground segment. */
-	if (conf.filter_ground_addresses && packet->id.sport > 8) {
-		csp_log_info("Frame filtered");
-		return;
-	}
-
-
 	/* XTEA encrypted packet */
-	if (conf.use_xtea) {
-#ifdef OLD_CSP
-		if (1)
-#else
+	if (conf.rx_use_xtea) {
+		csp_xtea_set_key(conf.rx_xtea_key, 20);
 		if (csp_xtea_decrypt_packet(packet) != CSP_ERR_NONE)
-#endif
 		{
 			csp_log_error("Decryption failed! Discarding packet");
 			csp_buffer_free(packet);
@@ -337,20 +282,22 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 		}
 	}
 
+	/* Validate CRC32 */
+	if (conf.rx_use_crc) {
+		int ret = csp_crc32_verify(packet, true);
+		if (ret != CSP_ERR_NONE)
+		{
+			csp_log_warn("CRC failed %d", ret);
+			csp_buffer_free(packet);
+			stats.rx_failed++;
+			return;
+		}
+	}
 
 	/* Verify HMAC if selected */
-	if (conf.use_hmac) {
-
-#ifdef OLD_CSP
-		/* Old CSP interface doesn't allow including the header in the HMAC, so we need to done this manually. */
-		uint8_t hmac[CSP_SHA1_DIGESTSIZE];
-		csp_sha1_memory(conf.hmac_key, (conf.legacy_hmac ? 4 : 16), hmac);
-		int ret = csp_hmac_memory(hmac, 16, &packet->id, packet->length + sizeof(packet->id), hmac);
-		if (ret != CSP_ERR_NONE && memcmp(&packet->data[packet->length] - CSP_HMAC_LENGTH, hmac, CSP_HMAC_LENGTH) != 0)
-			ret = CSP_ERR_HMAC;
-#else
+	if (conf.rx_use_hmac) {
+		csp_hmac_set_key(conf.rx_hmac_key, conf.rx_legacy_hmac ? 4 : 16);
 		int ret = csp_hmac_verify(packet, true);
-#endif
 		if (ret != CSP_ERR_NONE) {
 			csp_log_error("HMAC error %d", ret);
 			csp_buffer_free(packet);
@@ -359,22 +306,14 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 		}
 	}
 
+	/* Convert the packet from network to host order */
+	packet->id.ext = csp_ntoh32(packet->id.ext);
 
-	/* Validate CRC32 */
-	if (conf.use_crc) {
-#ifdef OLD_CSP
-		// TODO: Doesn't account the header correctly!
-		int ret = csp_crc32_verify(packet);
-#else
-		int ret = csp_crc32_verify(packet, true);
-#endif
-		if (ret != CSP_ERR_NONE)
-		{
-			csp_log_warn("CRC failed %d", ret);
-			csp_buffer_free(packet);
-			stats.rx_failed++;
-			return;
-		}
+	/* Ignore frame if source port indicates that is coming from ground segment. */
+	if (conf.rx_filter_ground_addresses && packet->id.sport > 8) {
+		csp_log_info("Frame filtered");
+		csp_buffer_free(packet);
+		return;
 	}
 
 	stats.rx_bytes += packet->length;

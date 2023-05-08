@@ -4,10 +4,11 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(SATELLITE_CONFIG_CPP "sample_cfg.cpp" CACHE STRING "Configuration file to be used")
+
 option(SUPPORT_PORTHOUSE "Compile with porthouse tracking support" OFF)
 option(SUPPORT_RIGCTL "Compile with rigctl tracking support" OFF)
 
-option(USE_EXTERNAL_SECRET "Use HMAC key defined in secret.hpp file" OFF)
 option(OUTPUT_RAW_FRAMES "Open additional ZMQ socket for raw frames" OFF)
 
 
@@ -16,6 +17,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
  
 add_compile_options(-g -Wall -Wextra)
 
+file(GENERATE OUTPUT debug.txt CONTENT "${SATELLITE_CONFIG_CPP}")
 
 # Setup csp_modem executable
 add_executable(csp_modem
@@ -23,7 +25,7 @@ add_executable(csp_modem
     csp_suo_adapter.cpp
     csp_if_zmq_server.cpp
     randomizer.cpp
-)
+    ${SATELLITE_CONFIG_CPP})
 
 
 # Setup Suo library
@@ -54,7 +56,9 @@ endif()
 
 if (USE_EXTERNAL_SECRET)
     target_compile_definitions(csp_modem PRIVATE EXTERNAL_SECRET)
-    #target_compile_definitions(csp_modem PRIVATE HMAC_HACK)
+    if (USE_HMAC_HACK)
+        target_compile_definitions(csp_modem PRIVATE HMAC_HACK)
+    endif()
 endif()
 
 if (OUTPUT_RAW_FRAMES)
