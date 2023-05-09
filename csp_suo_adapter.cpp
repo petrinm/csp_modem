@@ -13,15 +13,16 @@
 #include "libfec/fec.h"
 #endif
 
-#define CSP_RS_LEN      32
-#define CSP_RS_MSGLEN   256
-#define CSP_SUO_MTU     256
+#define CSP_RS_MSGLEN   223
+#define CSP_RS_PARITYS  32
 
 using namespace std;
 using namespace suo;
 
 
 CSPSuoAdapter::Config::Config() {
+	use_libfec = false;
+
 	rx_use_hmac = false;
 	rx_use_rs = false;
 	rx_use_crc = false;
@@ -55,6 +56,14 @@ CSPSuoAdapter::CSPSuoAdapter(const Config& _conf) :
 	csp_iface.name = "SUO";
 	csp_iface.interface_data = this;
 	csp_iface.mtu = csp_buffer_data_size();
+
+	if (conf.tx_use_rs) {
+		// Limit frame data size to Reed-Solomon message length
+		csp_iface.mtu = CSP_RS_MSGLEN - sizeof(csp_id_t);
+		// Make also sure the buffer allocation has room for complete Reed-Solomon codeword.
+		assert(csp_buffer_data_size() >= (CSP_RS_MSGLEN + CSP_RS_PARITYS) - sizeof(csp_id_t));
+	}
+
 	if (conf.tx_use_crc)
 		csp_iface.mtu -= sizeof(uint32_t);  // Reserve space for CRC32
 	if (conf.tx_use_hmac)
@@ -175,11 +184,13 @@ void CSPSuoAdapter::sourceFrame(Frame &frame, Timestamp now)
 #endif
 	}
 
-	if (conf.tx_use_rs) {
+	if (conf.use_libfec && conf.tx_use_rs) {
 #ifdef LIBFEC
 		encode_rs_8((uint8_t *)&tx_packet->id, &tx_packet->data[tx_packet->length], CSP_RS_MSGLEN - tx_packet->length);
-		tx_packet->length += CSP_RS_LEN;
+		tx_packet->length += CSP_RS_PARITYS;
 #else
+		csp_log_error("libfec not supported\n");
+		csp_buffer_free(tx_packet);
 		return;
 #endif
 	}
@@ -204,16 +215,13 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 
 	cout << frame;
 	
+	// Enough bit to 
 	if (frame.size() < sizeof(csp_id_t)) {
-		csp_log_warn("SUO: Too short datalen: %lu\n", frame.size());
+		csp_log_warn("Too short frame! len: %lu\n", frame.size());
 		return;
 	}
 
-	if (frame.size() > CSP_SUO_MTU)  {
-		csp_log_warn("SUO: Too long datalen: %lu\n", frame.size());
-		return;
-	}
-
+	// Allocate a new CSP frame
 	csp_packet_t *packet = static_cast<csp_packet_t*>(csp_buffer_get(frame.size() - sizeof(csp_id_t)));
 	if (packet == NULL)
 		throw SuoError("csp_buffer_get failed!");
@@ -229,42 +237,57 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 
 	/* Decode Reed-Solomon if selected */
 	if (conf.rx_use_rs) {
-#ifdef LIBFEC
-		int ret = decode_rs_8((uint8_t *)&packet->id, NULL, 0, CSP_RS_MSGLEN + CSP_RS_LEN - packet->length);
-		if (ret < 0) {
-			csp_log_error("Failed to decode RS");
-			csp_buffer_free(packet);
-			stats.rx_failed++;
-			return;
-		}
+		if (conf.use_libfec) {
+			// Enough bytes for Reed-Solomon decoder?
+			if (packet->length < CSP_RS_PARITYS || packet->length > (CSP_RS_MSGLEN + CSP_RS_PARITYS)) {
+				csp_log_warn("Invalid frame length for Reed-Solomon decoder. len: %d\n", packet->length);
+				return;
+			}
 
-		csp_log_info("RS corrected %d errors", ret);
-		stats.rx_corrected_bytes += ret;
+#ifdef LIBFEC
+			int ret = decode_rs_8((uint8_t *)&packet->id, NULL, 0, CSP_RS_MSGLEN + CSP_RS_PARITYS - packet->length);
+			if (ret < 0) {
+				csp_log_error("Failed to decode RS");
+				csp_buffer_free(packet);
+				stats.rx_failed++;
+				return;
+			}
+
+			csp_log_info("RS corrected %d errors", ret);
+			stats.rx_corrected_bytes += ret;
 
 #if 0
-		/* Count bit errors */
-		unsigned int corrected_bits = 0;
-		const uint8_t* original = static_cast<uint8_t*>(&packet->id); // TODO
-		const uint8_t* corrected = static_cast<uint8_t *>(&packet->id);
-		for (unsigned int i = 0; i < packet->length; i++)
-			corrected_bits += popcount(original[i] ^ corrected[i]);
-		stats.rx_bits_corrected += corrected_bits;
+			/* Count bit errors */
+			unsigned int corrected_bits = 0;
+			const uint8_t* original = static_cast<uint8_t*>(&packet->id); // TODO
+			const uint8_t* corrected = static_cast<uint8_t *>(&packet->id);
+			for (unsigned int i = 0; i < packet->length; i++)
+				corrected_bits += popcount(original[i] ^ corrected[i]);
+			stats.rx_bits_corrected += corrected_bits;
 #endif
 #else
-		csp_log_error("libfec not supported\n");
-		csp_buffer_free(packet);
-		return;
+			csp_log_error("libfec not supported\n");
+			csp_buffer_free(packet);
+			return;
 #endif
+		}
+		else {
+			// RS is used but decoding is implemented by suo.
+			// Increment statistics based on metadata inside the suo frame
+			try {
+				stats.rx_corrected_bytes += get<unsigned int>(frame.metadata.at("rs_bytes_corrected"));
+				stats.rx_bits_corrected += get<unsigned int>(frame.metadata.at("rs_bits_corrected"));
+			}
+			catch (std::out_of_range& e) {
+				cerr << "Frame missing field: " << e.what() << endl;
+			}
+		}
 	}
-	else {
-		// Increment statistics based on metadata inside the suo frame
-		try {
-			stats.rx_corrected_bytes += get<unsigned int>(frame.metadata.at("rs_bytes_corrected"));
-			stats.rx_bits_corrected += get<unsigned int>(frame.metadata.at("rs_bits_corrected"));
-		}
-		catch (std::out_of_range& e) {
-			cerr << "Frame missing field: " << e.what() << endl;
-		}
+
+	// Make sure there are enough bytes after RS decoder.
+	if (packet->length >= sizeof(csp_id_t)) {
+		csp_log_warn("Too short frame after decoding! len: %d\n", packet->length);
+		return;
 	}
 
 	/* The CSP packet length is without the header */

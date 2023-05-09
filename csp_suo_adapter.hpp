@@ -15,6 +15,7 @@ public:
 
 	struct Config {
 		Config();
+		bool use_libfec;
 
 		bool rx_use_hmac;
 		bool rx_use_rs;
