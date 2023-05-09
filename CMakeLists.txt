@@ -37,7 +37,6 @@ target_link_libraries(csp_modem PUBLIC ${Suo_LIBRARIES})
 find_package(CSP REQUIRED)
 target_include_directories(csp_modem PUBLIC ${CSP_INCLUDE_DIRS})
 target_link_libraries(csp_modem PUBLIC ${CSP_LIBRARIES})
-#target_compile_definitions(csp_modem PRIVATE OLD_CSP)
 
 # Setup ZMQ library
 find_package(ZeroMQ REQUIRED)
@@ -56,9 +55,6 @@ endif()
 
 if (USE_EXTERNAL_SECRET)
     target_compile_definitions(csp_modem PRIVATE EXTERNAL_SECRET)
-    if (USE_HMAC_HACK)
-        target_compile_definitions(csp_modem PRIVATE HMAC_HACK)
-    endif()
 endif()
 
 if (OUTPUT_RAW_FRAMES)
