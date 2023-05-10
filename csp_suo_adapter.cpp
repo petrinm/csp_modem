@@ -333,7 +333,7 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	packet->id.ext = csp_ntoh32(packet->id.ext);
 
 	/* Ignore frame if source port indicates that is coming from ground segment. */
-	if (conf.rx_filter_ground_addresses && packet->id.sport > 8) {
+	if (conf.rx_filter_ground_addresses && packet->id.src > 8) {
 		csp_log_info("Frame filtered");
 		csp_buffer_free(packet);
 		return;
